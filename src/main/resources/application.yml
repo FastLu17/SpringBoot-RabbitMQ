@@ -1,0 +1,26 @@
+spring:
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: admin
+    password: 123456
+    publisher-confirm-type: simple
+    publisher-returns: true
+    listener:
+      simple:
+        retry: # spring.rabbitmq.listener.simple.retry 配置的重试是在消费端应用内处理的，不是rabbitMQ重发
+          enabled: true  # 开启重试
+          initial-interval: 1000 # 1秒后重试
+          max-attempts: 3 # 传递消息的最大尝试次数
+          max-interval: 10000 # 尝试的最大时间间隔
+          multiplier: 2 # 应用于先前传递重试时间间隔的乘数
+        acknowledge-mode: manual # 手动ack、
+        default-requeue-rejected: true # 消息消费失败后，重新进入消费队列中
+# Redis 配置、
+  cache:
+    cache-names: DEAD_LETTER_CACHE
+    type: redis
+  redis:
+    port: 6379
+    password: lims
+    host: localhost
