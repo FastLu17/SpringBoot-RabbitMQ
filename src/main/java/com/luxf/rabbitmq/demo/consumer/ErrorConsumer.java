@@ -11,7 +11,7 @@ import org.springframework.stereotype.Component;
  * @date 2020-06-22 19:58
  **/
 @Component
-@RabbitListener(queues = "routingKeyForError")
+@RabbitListener(queues = "queueForError")
 public class ErrorConsumer {
 
     @RabbitHandler

@@ -145,13 +145,13 @@ public class RabbitQueueAndExchangeConfig {
     }
 
     @Bean
-    public Queue routingKeyForError() {
-        return new Queue("routingKeyForError");
+    public Queue queueForError() {
+        return new Queue("queueForError");
     }
 
     @Bean
-    Binding bindingExchangeForError(Queue routingKeyForError, DirectExchange exchangeForError) {
-        return BindingBuilder.bind(routingKeyForError).to(exchangeForError).with("routingKeyForError");
+    Binding bindingExchangeForError(Queue queueForError, DirectExchange exchangeForError) {
+        return BindingBuilder.bind(queueForError).to(exchangeForError).with("routingKeyForError");
     }
 
     /**
