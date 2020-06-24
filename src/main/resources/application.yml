@@ -4,7 +4,7 @@ spring:
     port: 5672
     username: admin
     password: 123456
-    publisher-confirm-type: simple
+    publisher-confirm-type: correlated
     publisher-returns: true
     listener:
       simple:

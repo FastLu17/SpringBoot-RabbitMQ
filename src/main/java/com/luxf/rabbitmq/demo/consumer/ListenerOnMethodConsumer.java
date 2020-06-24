@@ -1,19 +1,18 @@
 package com.luxf.rabbitmq.demo.consumer;
 
 import com.luxf.rabbitmq.demo.config.RabbitMqReTryConfig;
+import com.luxf.rabbitmq.demo.config.ChannelCache;
 import com.rabbitmq.client.Channel;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.annotation.*;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.amqp.RabbitProperties;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.messaging.handler.annotation.Headers;
 import org.springframework.messaging.handler.annotation.Payload;
-import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -110,13 +109,19 @@ public class ListenerOnMethodConsumer {
             // routingKey
             key = "direct"
     ))
-    @Retryable()
     public void consumer(String body, Channel channel, Message message, @Headers Map<String, Object> headers) throws IOException {
         // 业务中正常不会传递String、一般是JSON格式对象, JSONObject、通过message.getBody()可以获取具体内容
         log.info("当前时间：" + LocalDateTime.now() + ", 监听到一条消息 --> " + body);
         MessageProperties messageProperties = message.getMessageProperties();
 
-        Object correlationId = message.getMessageProperties().getHeaders().get("spring_returned_message_correlation");
+        /**
+         * spring_returned_message_correlation：发送消息时,自定义的CorrelationDataID、不传则为null
+         * spring_listener_return_correlation：Spring RabbitMQ 自动生成的UUID, 必定不为null、
+         *
+         * 缓存Channel 推荐使用 spring_listener_return_correlation, 如果业务每个消息都会自定义CorrelationDataID, 使用CorrelationDataID也可以！
+         */
+        Object correlationId = message.getMessageProperties().getHeaders().get(ChannelCache.MESSAGE_CORRELATION_ID);
+        Object listenerCorrelationId = message.getMessageProperties().getHeaders().get(ChannelCache.LISTENER_CORRELATION_ID);
 
         String successMessageKey = "SUCCESS_MESSAGE_CORRELATION_ID::" + correlationId;
         String successMessage = redisTemplate.opsForValue().get(successMessageKey);
@@ -124,8 +129,9 @@ public class ListenerOnMethodConsumer {
         if (successMessage != null) {
             channel.basicNack(messageProperties.getDeliveryTag(), true, false);
         }
-        // headers不包含 XDeathHeader
-        Object tag = headers.get(AmqpHeaders.DELIVERY_TAG);
+        // TODO: 将当前的Channel对象缓存、 在Spring Retry重试失败次数耗尽后, 获取该Channel对象, 进行手动ACK、
+        // 如果出现ChannelCache.INSTANCE.get()获取到的不是同一个Channel对象, 则使用ChannelCache.INSTANCE.put()方法覆盖、
+        ChannelCache.INSTANCE.putIfAbsent(listenerCorrelationId.toString(), channel);
 
         /**
          * Spring Boot RabbitMQ 无法通过message获取重试次数、原生的RabbitMQ可以通过这种方式获取
@@ -145,45 +151,47 @@ public class ListenerOnMethodConsumer {
          */
 
         /**
+         * 以 IRetryListener 监听的方式, 重试次数达到上限之后, 无法对消息进行手动ack、消息一直处于'unacked'状态！
+         * 利用单例对象缓存Channel对象, 可以解决！
          *
          * 正常手动确认ACK即可、如果业务消费失败, 会被{@link RabbitMqReTryConfig.IRetryListener}监听、进行重试
+         * TODO: 使用Spring Retry时, 不要对消费者的消费方法try..catch, 直接抛出异常即可！
          */
-
+        int i = 1 / 0;
+        channel.basicAck(messageProperties.getDeliveryTag(), true);
+        // 如果正常ACK, 则移除缓存的Channel对象、
+        ChannelCache.INSTANCE.remove(listenerCorrelationId.toString());
 
         /**
-         *
-         * // 以 IRetryListener 监听的方式, 重试次数达到上限之后, 无法对消息进行手动ack、消息一直处于unacked状态！
-         * int i = 1 / 0;
-         * channel.basicAck(messageProperties.getDeliveryTag(), true);
+         *  下面是通过Redis缓存重试失败次数的方式解决、
          */
-
-        try {
-            // 消息内容、进行业务消费
-            String messageBody = new String(message.getBody());
-            int i = 1 / 0;
-            channel.basicAck(messageProperties.getDeliveryTag(), true);
-            // 成功消费消息, 则进行存储, 避免重复消费的问题。
-            redisTemplate.opsForValue().setIfAbsent(successMessageKey, new String(message.getBody()));
-        } catch (Exception e) {
-            String failedMessageKey = "FAILED_MESSAGE_CORRELATION_ID::" + correlationId;
-            String failedMessage = redisTemplate.opsForValue().get(failedMessageKey);
-            // 判断是否重复消费异常消息
-            if (failedMessage != null) {
-                channel.basicNack(messageProperties.getDeliveryTag(), true, false);
-            }
-
-            String retryKey = "RETRY_COUNT::" + correlationId;
-            String count = redisTemplate.opsForValue().get(retryKey);
-            int maxAttempts = properties.getListener().getSimple().getRetry().getMaxAttempts();
-            if (count == null || Integer.parseInt(count) < maxAttempts) {
-                redisTemplate.opsForValue().increment(retryKey);
-                // 第三个参数：是否重新放入队列、
-                channel.basicNack(messageProperties.getDeliveryTag(), true, true);
-            }
-            // 这里是直接丢弃、也可以放入死信队列
-            // rabbitTemplate.convertAndSend("deadLetterExchange","deadLetterKey",msg);
-            channel.basicNack(messageProperties.getDeliveryTag(), true, false);
-            redisTemplate.opsForValue().setIfAbsent(failedMessageKey, new String(message.getBody()));
-        }
+//        try {
+//            // 消息内容、进行业务消费
+//            String messageBody = new String(message.getBody());
+//            int i = 1 / 0;
+//            channel.basicAck(messageProperties.getDeliveryTag(), true);
+//            // 成功消费消息, 则进行存储, 避免重复消费的问题。
+//            redisTemplate.opsForValue().setIfAbsent(successMessageKey, new String(message.getBody()));
+//        } catch (Exception e) {
+//            String failedMessageKey = "FAILED_MESSAGE_CORRELATION_ID::" + correlationId;
+//            String failedMessage = redisTemplate.opsForValue().get(failedMessageKey);
+//            // 判断是否重复消费异常消息
+//            if (failedMessage != null) {
+//                channel.basicNack(messageProperties.getDeliveryTag(), true, false);
+//            }
+//
+//            String retryKey = "RETRY_COUNT::" + correlationId;
+//            String count = redisTemplate.opsForValue().get(retryKey);
+//            int maxAttempts = properties.getListener().getSimple().getRetry().getMaxAttempts();
+//            if (count == null || Integer.parseInt(count) < maxAttempts) {
+//                redisTemplate.opsForValue().increment(retryKey);
+//                // 第三个参数：是否重新放入队列、
+//                channel.basicNack(messageProperties.getDeliveryTag(), true, true);
+//            }
+//            // 这里是直接丢弃、也可以放入死信队列
+//            // rabbitTemplate.convertAndSend("deadLetterExchange","deadLetterKey",msg);
+//            channel.basicNack(messageProperties.getDeliveryTag(), true, false);
+//            redisTemplate.opsForValue().setIfAbsent(failedMessageKey, new String(message.getBody()));
+//        }
     }
 }

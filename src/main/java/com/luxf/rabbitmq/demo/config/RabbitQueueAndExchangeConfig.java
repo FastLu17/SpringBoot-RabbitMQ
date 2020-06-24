@@ -8,6 +8,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.util.HashMap;
+
 /**
  * 该类初始化创建队列、交换机，并把队列绑定到交换机
  * 可以定义多个Queue, Exchange
@@ -24,7 +26,7 @@ public class RabbitQueueAndExchangeConfig {
 
     @Bean
     public Queue directQueue() {
-        return new Queue("directQueue");
+        return new Queue("directQueue", true);
     }
 
     //===============以下是验证topic Exchange的队列==========
@@ -69,7 +71,7 @@ public class RabbitQueueAndExchangeConfig {
      */
     @Bean
     DirectExchange directExchange() {
-        return new DirectExchange("directExchange");
+        return new DirectExchange("directExchange", true, false);
     }
 
     @Bean
@@ -160,7 +162,7 @@ public class RabbitQueueAndExchangeConfig {
      * <p>
      * 1、RepublishMessageRecoverer：将消息重新发送到指定队列, 需手动配置。
      * 2、RejectAndDontRequeueRecoverer：如果不手动配置MessageRecoverer，会默认使用这个。
-     *
+     * <p>
      * 需要主动在重测结束的地方执行 recover.recover(message, lastThrowable); --> 相当于rabbitTemplate.convertAndSend()、
      *
      * @param rabbitTemplate template
@@ -176,6 +178,12 @@ public class RabbitQueueAndExchangeConfig {
      */
     @Bean
     public Queue deadLetterQueue() {
+        HashMap<String, Object> arguments = new HashMap<>(2);
+        // 声明死信队列的Exchange、
+        arguments.put("x-dead-letter-exchange", "deadLetterExchange");
+        // 声明死信队列的routingKey、
+        arguments.put("x-dead-letter-routing-key", "deadLetterKey");
+        QueueBuilder.durable("deadLetterQueue").withArguments(arguments).build();
         return new Queue("deadLetterQueue", true);
     }
 

@@ -1,5 +1,6 @@
 package com.luxf.rabbitmq.demo.config;
 
+import com.rabbitmq.client.Channel;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.Message;
@@ -26,6 +27,7 @@ import org.springframework.retry.interceptor.RetryInterceptorBuilder;
 import org.springframework.retry.policy.SimpleRetryPolicy;
 import org.springframework.retry.support.RetryTemplate;
 
+import java.io.IOException;
 import java.util.Collection;
 import java.util.UUID;
 
@@ -33,7 +35,8 @@ import java.util.UUID;
  * 直接利用try..catch, 在catch中处理 channel.basicNack()能够让消息回到队列中,这样可以实现重试。
  * 但是没有明确重试次数, 如果当前消息, 消费失败, 一直重试, 堆积起来！--> 致命缺点！
  * <p>
- * 利用Spring Retry 完成对RabbitMQ的重测监听、
+ * 利用Spring Retry 完成对RabbitMQ的重测监听。
+ * TODO:如果设置自动ACK、则会循环重试, 如果设置手动ACK, 则重试失败后, 消息处于'unacked'状态、目前没有找到解决办法
  * <p>
  * TODO: 如果不使用Spring Retry -> 则使用redis或者mongo等第三方存储当前重试次数。监听到消息时, 先判断重试次数, 来决定是否放入失信队列、存入数据库
  *
@@ -84,8 +87,10 @@ public class RabbitMqReTryConfig {
         // 最大消费者数量
         containerFactory.setMaxConcurrentConsumers(20);
 
-        // 手动应答、此处不设置AcknowledgeMode, 则yml中的ack配置会被覆盖
+        // TODO: 设置自动ACK、并且设置default-requeue-rejected=false、可以解决Spring Retry 重试失败后, 消息处于'unacked'状态的问题、
+        // 设置手动ACK时, 则需要利用单例对象缓存Channel, 以便进行手动ACK,NACK回复、
         containerFactory.setAcknowledgeMode(AcknowledgeMode.MANUAL);
+        // containerFactory.setDefaultRequeueRejected(false);
 
         // 设置自定义的消息转换器、 将消息转换为Json对象、
         // containerFactory.setMessageConverter(new Jackson2JsonMessageConverter())
@@ -147,6 +152,10 @@ public class RabbitMqReTryConfig {
 
     /**
      * 自定义重试监听、 TODO: 目前无法对消息手动ACK, 还是使用Redis的方式存储重试失败次数
+     * <p>
+     * 1、设置自动ACK、并且设置default-requeue-rejected=false、可以解决Spring Retry 重试失败后, 消息处于'unacked'状态的问题、
+     * <p>
+     * 2、利用单例对象{@link ChannelCache}缓存Channel对象, 然后在close()方法中, 进行手动ACK、
      */
     private class IRetryListener implements RetryListener {
         @Override
@@ -162,8 +171,18 @@ public class RabbitMqReTryConfig {
             if (lastThrowable != null && ListenerExecutionFailedException.class.isAssignableFrom(lastThrowable.getClass())) {
                 ListenerExecutionFailedException exception = (ListenerExecutionFailedException) lastThrowable;
                 Collection<Message> failedMessages = exception.getFailedMessages();
-                //TODO: 没有对错误的消息进行ACK, 消息一直存在(unacked状态)。如何解决？
+                //TODO: 没有对错误的消息进行ACK, 消息一直存在(unacked状态)。如何解决？--> 消费端消费时, 通过单例对象缓存Channel、
                 failedMessages.forEach(message -> {
+                    Object listenerCorrelationId = message.getMessageProperties().getHeaders().get(ChannelCache.LISTENER_CORRELATION_ID);
+                    Channel channel = ChannelCache.INSTANCE.get(listenerCorrelationId.toString());
+                    if (channel != null) {
+                        try {
+                            channel.basicNack(1, true, false);
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                        ChannelCache.INSTANCE.remove(listenerCorrelationId.toString());
+                    }
                     // 方案1、丢入死信队列。
                     CorrelationData correlationData = new CorrelationData();
                     String id = UUID.randomUUID().toString().replaceAll("-", "").toUpperCase();
@@ -172,8 +191,8 @@ public class RabbitMqReTryConfig {
                             new String(message.getBody()), correlationData);
 
                     // 方案2、Redis缓存、MySQL持久化。
-                    // 此处的correlationId是发送消息时, 传递的唯一值、
-                    Object correlationId = message.getMessageProperties().getHeaders().get("spring_returned_message_correlation");
+                    // 此处的correlationId是发送消息时, 传递的唯一值, 推荐使用spring_listener_return_correlation, 会自动生成UUID、
+                    Object correlationId = message.getMessageProperties().getHeaders().get(ChannelCache.MESSAGE_CORRELATION_ID);
                     redisTemplate.opsForValue().setIfAbsent("FAILED_MESSAGE_CORRELATION_ID::" + correlationId, new String(message.getBody()));
                 });
             }

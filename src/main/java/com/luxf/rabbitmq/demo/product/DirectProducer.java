@@ -35,6 +35,7 @@ public class DirectProducer {
         System.out.println("id = " + id);
         // 消息绑定ID, 正常业务中,需要生成一个唯一的ID、
         correlationData.setId(id);
-        rabbitTemplate.convertAndSend("directExchange", "direct", msgString, correlationData);
+//        rabbitTemplate.convertAndSend("directExchange", "direct", msgString, correlationData);
+        rabbitTemplate.convertAndSend("directExchange", "direct", msgString);
     }
 }
