@@ -17,10 +17,7 @@ import org.springframework.boot.autoconfigure.amqp.RabbitProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.retry.RetryCallback;
-import org.springframework.retry.RetryContext;
-import org.springframework.retry.RetryListener;
-import org.springframework.retry.RetryPolicy;
+import org.springframework.retry.*;
 import org.springframework.retry.backoff.BackOffPolicy;
 import org.springframework.retry.backoff.ExponentialBackOffPolicy;
 import org.springframework.retry.interceptor.RetryInterceptorBuilder;
@@ -121,13 +118,13 @@ public class RabbitMqReTryConfig {
          * 设置重试策略 和 回退策略
          * {@link RetryPolicy}和{@link BackOffPolicy}有多种实现方式, 可根据不同的需求配置
          */
-        retryTemplate.setBackOffPolicy(backOffPolicyByProperties());
+        retryTemplate.setBackOffPolicy(backOffPolicy());
         retryTemplate.setRetryPolicy(retryPolicy());
         return retryTemplate;
     }
 
     @Bean
-    public ExponentialBackOffPolicy backOffPolicyByProperties() {
+    public ExponentialBackOffPolicy backOffPolicy() {
         ExponentialBackOffPolicy backOffPolicy = new ExponentialBackOffPolicy();
         long maxInterval = properties.getListener().getSimple().getRetry().getMaxInterval().getSeconds();
         long initialInterval = properties.getListener().getSimple().getRetry().getInitialInterval().getSeconds();
@@ -168,6 +165,14 @@ public class RabbitMqReTryConfig {
         public <T, E extends Throwable> void close(RetryContext retryContext, RetryCallback<T, E> retryCallback, Throwable throwable) {
             // 重试结束的时候调用、(最后一次重试,如果最后重试失败, 可以配置丢入死信队列或Redis、MySQL数据库)
             Throwable lastThrowable = retryContext.getLastThrowable();
+            // 如果lastThrowable == null. 则表示重试没有失败、
+            /**
+             * @see RetryTemplate#doExecute(RetryCallback, RecoveryCallback, RetryState)
+             *
+             * while循环重试之前：
+             * 1、重置lastException = null;
+             * 2、retryCallback.doWithRetry(context); // 执行重试.
+             */
             if (lastThrowable != null && ListenerExecutionFailedException.class.isAssignableFrom(lastThrowable.getClass())) {
                 ListenerExecutionFailedException exception = (ListenerExecutionFailedException) lastThrowable;
                 Collection<Message> failedMessages = exception.getFailedMessages();
@@ -178,10 +183,10 @@ public class RabbitMqReTryConfig {
                     if (channel != null) {
                         try {
                             channel.basicNack(1, true, false);
+                            ChannelCache.INSTANCE.remove(listenerCorrelationId.toString());
                         } catch (IOException e) {
                             e.printStackTrace();
                         }
-                        ChannelCache.INSTANCE.remove(listenerCorrelationId.toString());
                     }
                     // 方案1、丢入死信队列。
                     CorrelationData correlationData = new CorrelationData();
